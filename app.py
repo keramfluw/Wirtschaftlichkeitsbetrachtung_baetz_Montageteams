@@ -8,7 +8,6 @@ st.set_page_config(page_title="Einnahmen- & Kostenrechner", layout="wide")
 st.title("Einnahmen- & Kostenrechner (Thermomess / BAETZ – flexibel)")
 
 # Defaults (aus Konditionsblatt, gültig ab 01.07.2024 – Bayern)
-# Werte können in der App überschrieben werden.
 DEFAULT_POSITIONS = [
     {"Position": "Ablesung je HKV, WZ, WMZ", "Einheit": "Stk", "Preis_EUR": 1.05, "Menge": 0},
     {"Position": "Mindestsatz Hauptablesung (nur Kleinanlagen <20 Ablesungen)", "Einheit": "pauschal", "Preis_EUR": 21.00, "Menge": 0},
@@ -53,23 +52,37 @@ def to_number(val):
     except Exception:
         return 0.0
 
+# -----------------------------
+# Session init
+# -----------------------------
+if "positions_df" not in st.session_state:
+    st.session_state.positions_df = pd.DataFrame(DEFAULT_POSITIONS)
+
+if "employees_df" not in st.session_state:
+    st.session_state.employees_df = pd.DataFrame(
+        [
+            {"Mitarbeiter": "MA 1", "Kosten_pro_Arbeitstag_EUR": 0.0},
+            {"Mitarbeiter": "MA 2", "Kosten_pro_Arbeitstag_EUR": 0.0},
+        ]
+    )
+
 # Sidebar: Betrachtungshorizont
 with st.sidebar:
     st.header("Betrachtungshorizont")
-    horizon_mode = st.selectbox("Modus", ["Arbeitstage", "Wochen", "Monate", "Custom (Tage)"], index=0)
+    horizon_mode = st.selectbox("Modus", ["Arbeitstage", "Wochen", "Monate", "Custom (Tage)"], index=0, key="horizon_mode")
     if horizon_mode == "Arbeitstage":
-        workdays = st.number_input("Arbeitstage", min_value=0, value=20, step=1)
+        workdays = st.number_input("Arbeitstage", min_value=0, value=20, step=1, key="workdays_input")
         horizon_label = f"{workdays} Arbeitstage"
     elif horizon_mode == "Wochen":
-        weeks = st.number_input("Wochen", min_value=0, value=4, step=1)
+        weeks = st.number_input("Wochen", min_value=0, value=4, step=1, key="weeks_input")
         workdays = weeks * 5
         horizon_label = f"{weeks} Wochen (~{workdays} Arbeitstage)"
     elif horizon_mode == "Monate":
-        months = st.number_input("Monate", min_value=0, value=1, step=1)
+        months = st.number_input("Monate", min_value=0, value=1, step=1, key="months_input")
         workdays = months * 20
         horizon_label = f"{months} Monate (~{workdays} Arbeitstage)"
     else:
-        days = st.number_input("Tage", min_value=0, value=30, step=1)
+        days = st.number_input("Tage", min_value=0, value=30, step=1, key="days_input")
         workdays = int(round(days * 5 / 7))
         horizon_label = f"{days} Tage (~{workdays} Arbeitstage)"
 
@@ -85,80 +98,88 @@ with st.expander("Optional: Datei-Import (CSV/XLSX) zum Vorbelegen von Mengen", 
         "Die App versucht typische Spalten zu erkennen (z. B. Montagen, Ablesungen, Wartungen, "
         "Anfahrten Tarif 1–4, Regieleistung in Min.)."
     )
-    upl = st.file_uploader("Datei auswählen (CSV oder XLSX)", type=["csv", "xlsx"])
+    upl = st.file_uploader("Datei auswählen (CSV oder XLSX)", type=["csv", "xlsx"], key="upl_file")
     import_info = st.empty()
+
+def maybe_import(upl_file):
+    # Wichtig: Import nur EINMAL pro Datei ausführen, damit man danach manuell editieren kann,
+    # ohne dass beim nächsten Rerun die Werte wieder überschrieben werden.
+    if upl_file is None:
+        return
+    file_id = f"{upl_file.name}-{upl_file.size}"
+    if st.session_state.get("last_import_file_id") == file_id:
+        return  # schon importiert
+    try:
+        if upl_file.name.lower().endswith(".csv"):
+            raw = upl_file.getvalue().decode("utf-8", errors="ignore")
+            sep = ";" if raw.count(";") >= raw.count(",") else ","
+            df_in = pd.read_csv(StringIO(raw), sep=sep)
+        else:
+            df_in = pd.read_excel(upl_file)
+
+        df_in.columns = [c.strip() for c in df_in.columns]
+        cols = list(df_in.columns)
+        colmap = {c.lower(): c for c in cols}
+
+        def pick(*names):
+            for n in names:
+                if n.lower() in colmap:
+                    return colmap[n.lower()]
+            return None
+
+        c_mont = pick("Montagen")
+        c_abl = pick("Ablesungen")
+        c_wart = pick("Wartungen")
+        c_a1 = pick("Anfahrten Tarif 1", "Anfahrten Tarif1", "Anfahrt Tarif 1")
+        c_a2 = pick("Anfahrten Tarif 2", "Anfahrten Tarif2", "Anfahrt Tarif 2")
+        c_a3 = pick("Anfahrten Tarif 3", "Anfahrten Tarif3", "Anfahrt Tarif 3")
+        c_a4 = pick("Anfahrten Tarif 4", "Anfahrten Tarif4", "Anfahrt Tarif 4")
+        c_regmin = pick("Regieleistung in Min.", "Regieleistung in Min", "Regie in Min", "Regieleistung")
+
+        def sum_col(c):
+            if c is None:
+                return 0.0
+            return pd.to_numeric(df_in[c], errors="coerce").fillna(0).sum()
+
+        sums = {
+            "Schweiß-/Schraubmontage/Demontage HKV, Aufmaß, Aufnahme": sum_col(c_mont),
+            "Ablesung je HKV, WZ, WMZ": sum_col(c_abl),
+            "Wartung RWM Sicht-/Funktionsprüfung (DIN 14676) inkl. Doku": sum_col(c_wart),
+            "Anfahrt Tarif 1 (W01)": sum_col(c_a1),
+            "Anfahrt Tarif 2 (W02)": sum_col(c_a2),
+            "Anfahrt Tarif 3 (W03)": sum_col(c_a3),
+            "Anfahrt Tarif 4 (W04)": sum_col(c_a4),
+        }
+        if c_regmin is not None:
+            reg_min = sum_col(c_regmin)
+            sums["Regiearbeit (je 15 Min; 44 €/h)"] = reg_min / 15.0
+
+        df_pos = st.session_state.positions_df.copy()
+        for k, v in sums.items():
+            mask = df_pos["Position"] == k
+            if mask.any():
+                df_pos.loc[mask, "Menge"] = float(v)
+
+        st.session_state.positions_df = df_pos
+        st.session_state.last_import_file_id = file_id
+        import_info.success("Import erfolgreich: Mengen wurden vorbefüllt. (Ab jetzt kannst du manuell ändern.)")
+    except Exception as e:
+        import_info.error(f"Import fehlgeschlagen: {e}")
+
+maybe_import(upl)
 
 # Einnahmen
 st.subheader("1) Einnahmen (Positionen & Mengen)")
 colA, colB = st.columns([2, 1], gap="large")
 
 with colA:
-    if "positions_df" not in st.session_state:
-        st.session_state.positions_df = pd.DataFrame(DEFAULT_POSITIONS)
-
-    if upl is not None:
-        try:
-            if upl.name.lower().endswith(".csv"):
-                raw = upl.getvalue().decode("utf-8", errors="ignore")
-                sep = ";" if raw.count(";") >= raw.count(",") else ","
-                df_in = pd.read_csv(StringIO(raw), sep=sep)
-            else:
-                df_in = pd.read_excel(upl)
-
-            df_in.columns = [c.strip() for c in df_in.columns]
-            cols = list(df_in.columns)
-            colmap = {c.lower(): c for c in cols}
-
-            def pick(*names):
-                for n in names:
-                    if n.lower() in colmap:
-                        return colmap[n.lower()]
-                return None
-
-            c_mont = pick("Montagen")
-            c_abl = pick("Ablesungen")
-            c_wart = pick("Wartungen")
-            c_a1 = pick("Anfahrten Tarif 1", "Anfahrten Tarif1", "Anfahrt Tarif 1")
-            c_a2 = pick("Anfahrten Tarif 2", "Anfahrten Tarif2", "Anfahrt Tarif 2")
-            c_a3 = pick("Anfahrten Tarif 3", "Anfahrten Tarif3", "Anfahrt Tarif 3")
-            c_a4 = pick("Anfahrten Tarif 4", "Anfahrten Tarif4", "Anfahrt Tarif 4")
-            c_regmin = pick("Regieleistung in Min.", "Regieleistung in Min", "Regie in Min", "Regieleistung")
-
-            def sum_col(c):
-                if c is None:
-                    return 0.0
-                return pd.to_numeric(df_in[c], errors="coerce").fillna(0).sum()
-
-            sums = {
-                "Schweiß-/Schraubmontage/Demontage HKV, Aufmaß, Aufnahme": sum_col(c_mont),
-                "Ablesung je HKV, WZ, WMZ": sum_col(c_abl),
-                "Wartung RWM Sicht-/Funktionsprüfung (DIN 14676) inkl. Doku": sum_col(c_wart),
-                "Anfahrt Tarif 1 (W01)": sum_col(c_a1),
-                "Anfahrt Tarif 2 (W02)": sum_col(c_a2),
-                "Anfahrt Tarif 3 (W03)": sum_col(c_a3),
-                "Anfahrt Tarif 4 (W04)": sum_col(c_a4),
-            }
-            if c_regmin is not None:
-                reg_min = sum_col(c_regmin)
-                sums["Regiearbeit (je 15 Min; 44 €/h)"] = reg_min / 15.0
-
-            df_pos = st.session_state.positions_df.copy()
-            for k, v in sums.items():
-                mask = df_pos["Position"] == k
-                if mask.any():
-                    df_pos.loc[mask, "Menge"] = float(v)
-
-            st.session_state.positions_df = df_pos
-            import_info.success("Import erfolgreich: Mengen wurden (soweit erkennbar) vorbefüllt.")
-        except Exception as e:
-            import_info.error(f"Import fehlgeschlagen: {e}")
-
-    st.caption("Du kannst Preise und Mengen überschreiben. Zusätzliche Zeilen sind möglich.")
-    st.session_state.positions_df = st.data_editor(
+    st.caption("Tipp: Nach Eingabe kurz außerhalb der Zelle klicken (Commit).")
+    edited_positions = st.data_editor(
         st.session_state.positions_df,
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
+        key="positions_editor",
         column_config={
             "Position": st.column_config.TextColumn(width="large"),
             "Einheit": st.column_config.TextColumn(width="small"),
@@ -166,6 +187,8 @@ with colA:
             "Menge": st.column_config.NumberColumn(step=1),
         },
     )
+    # wichtig: NICHT wieder neu bauen; einfach übernehmen
+    st.session_state.positions_df = edited_positions.copy()
 
 with colB:
     df_pos = st.session_state.positions_df.copy()
@@ -185,32 +208,22 @@ st.subheader("2) Ausgaben (Mitarbeiter, Arbeitstage, Fixkosten)")
 c1, c2, c3 = st.columns([1.2, 1.2, 1.0], gap="large")
 
 with c1:
-    num_employees = st.number_input("Anzahl Mitarbeiter", min_value=0, value=2, step=1)
-    st.caption("Die Tabelle wird automatisch auf die Anzahl erweitert/gekürzt.")
-    if "employees_df" not in st.session_state:
-        st.session_state.employees_df = pd.DataFrame(
-            [
-                {"Mitarbeiter": "MA 1", "Kosten_pro_Arbeitstag_EUR": 0.0},
-                {"Mitarbeiter": "MA 2", "Kosten_pro_Arbeitstag_EUR": 0.0},
-            ]
-        )
-
+    num_employees = st.number_input("Anzahl Mitarbeiter", min_value=0, value=max(2, len(st.session_state.employees_df)), step=1, key="num_employees")
     emp = st.session_state.employees_df.copy()
 
+    # resize to num_employees
     if len(emp) < num_employees:
         for i in range(len(emp) + 1, num_employees + 1):
-            emp = pd.concat(
-                [emp, pd.DataFrame([{"Mitarbeiter": f"MA {i}", "Kosten_pro_Arbeitstag_EUR": 0.0}])],
-                ignore_index=True,
-            )
+            emp = pd.concat([emp, pd.DataFrame([{"Mitarbeiter": f"MA {i}", "Kosten_pro_Arbeitstag_EUR": 0.0}])], ignore_index=True)
     elif len(emp) > num_employees:
         emp = emp.iloc[:num_employees].reset_index(drop=True)
 
-    st.session_state.employees_df = st.data_editor(
+    edited_emp = st.data_editor(
         emp,
         num_rows="fixed",
         use_container_width=True,
         hide_index=True,
+        key="employees_editor",
         column_config={
             "Mitarbeiter": st.column_config.TextColumn(width="medium"),
             "Kosten_pro_Arbeitstag_EUR": st.column_config.NumberColumn(
@@ -220,12 +233,13 @@ with c1:
             ),
         },
     )
+    st.session_state.employees_df = edited_emp.copy()
 
 with c2:
     st.write("**Arbeitstage (aus Horizont):**")
     st.metric("Arbeitstage", int(workdays))
-    fixed_costs = st.number_input("Fixkosten im Horizont (EUR)", min_value=0.0, value=0.0, step=50.0)
-    variable_other = st.number_input("Sonstige variable Kosten (EUR)", min_value=0.0, value=0.0, step=50.0)
+    fixed_costs = st.number_input("Fixkosten im Horizont (EUR)", min_value=0.0, value=0.0, step=50.0, key="fixed_costs")
+    variable_other = st.number_input("Sonstige variable Kosten (EUR)", min_value=0.0, value=0.0, step=50.0, key="variable_other")
 
 with c3:
     emp2 = st.session_state.employees_df.copy()
@@ -266,6 +280,7 @@ with st.expander("Details: Umsatz- & Kosten-Tabelle", expanded=True):
         st.write(f"- Fixkosten: {money(float(fixed_costs))}")
         st.write(f"- Sonstige variable Kosten: {money(float(variable_other))}")
 
+# Szenario Export/Import
 scenario = {
     "horizon_mode": horizon_mode,
     "workdays": int(workdays),
@@ -284,16 +299,23 @@ with st.sidebar:
         mime="application/json",
         use_container_width=True,
     )
-    up_scn = st.file_uploader("Szenario JSON importieren", type=["json"])
+    up_scn = st.file_uploader("Szenario JSON importieren", type=["json"], key="scenario_upl")
     if up_scn is not None:
         try:
             scn = json.loads(up_scn.getvalue().decode("utf-8"))
             if "positions" in scn:
                 st.session_state.positions_df = pd.DataFrame(scn["positions"])
+                # reset editor widget so values show instantly
+                st.session_state["positions_editor"] = st.session_state.positions_df
             if "employees" in scn:
                 st.session_state.employees_df = pd.DataFrame(scn["employees"])
-            st.success("Szenario importiert. (Falls nötig: Seite neu laden.)")
+                st.session_state["employees_editor"] = st.session_state.employees_df
+            if "fixed_costs" in scn:
+                st.session_state["fixed_costs"] = float(scn["fixed_costs"])
+            if "variable_other" in scn:
+                st.session_state["variable_other"] = float(scn["variable_other"])
+            st.success("Szenario importiert.")
         except Exception as e:
             st.error(f"Import fehlgeschlagen: {e}")
 
-st.caption("Hinweis: Preise sind Defaultwerte; du kannst sie jederzeit anpassen. Die App ist als flexibles Kalkulationswerkzeug gedacht.")
+st.caption("Hinweis: Preise sind Defaultwerte; du kannst sie jederzeit anpassen.")
