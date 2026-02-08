@@ -1,8 +1,20 @@
-# Einnahmen- & Kostenrechner (Streamlit) – v3
+# Einnahmen- & Kostenrechner (Streamlit) – v4 (Bugfix)
 
-**Fix für „erst beim zweiten Mal“ in der Mengen-Spalte:**
-- Der `st.data_editor` wird jetzt als **Single Source of Truth** direkt über seinen `key` in `st.session_state` geführt.
-- Dadurch wird der Editor-State beim ersten Enter/Rerun nicht mehr durch ein parallel gepflegtes DataFrame „zurückgesetzt“.
+## Was war kaputt?
+
+In Streamlit 1.54 (wie in deinen Logs) ist es **nicht erlaubt**, einen Wert direkt über
+`st.session_state["<widget_key>"] = ...` zu setzen, wenn `<widget_key>` gleichzeitig als `key=...`
+für ein Widget (z. B. `st.data_editor`) verwendet wird. Das führt zu:
+
+- `StreamlitValueAssignmentNotAllowedError: Values for the widget with key ... cannot be set using st.session_state`
+
+Genau das ist in deinen Logs sichtbar. fileciteturn1file0
+
+## Fix
+
+- Der Dataframe wird unter **positions_df** / **employees_df** gespeichert.
+- Die Widget-Keys (`positions_editor`, `employees_editor`) werden **nicht** direkt beschrieben.
+- Der Editor gibt ein Dataframe zurück, das wir in **positions_df** speichern.
 
 ## Installation
 
@@ -18,7 +30,3 @@ pip install -r requirements.txt
 ```bash
 streamlit run app.py
 ```
-
-## Tipp zur Bedienung (Streamlit-Standard)
-- Werte werden sicher übernommen, sobald die Zelle **verlassen** wird (z. B. Klick außerhalb).
-- Mit v3 sollten auch schnelle Edits mit Enter zuverlässig stehen bleiben.
