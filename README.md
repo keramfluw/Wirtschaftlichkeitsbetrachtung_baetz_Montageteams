@@ -1,17 +1,8 @@
-# Einnahmen- & Kostenrechner (Streamlit)
+# Einnahmen- & Kostenrechner (Streamlit) – v3
 
-**Update v2:** Eingaben im Data-Editor werden jetzt sofort übernommen (kein „zweiter Versuch“ nötig).
-Außerdem wird ein Datei-Import nur **einmal pro Datei** ausgeführt, damit man danach sauber manuell anpassen kann.
-
-## Features
-
-- Flexible **Einnahmen-Kalkulation** (Positionen, Preise, Mengen; Zeilen dynamisch)
-- **Betrachtungshorizont**: Arbeitstage / Wochen / Monate / Custom (Tage → Arbeitstage)
-- **Mitarbeiteranzahl** frei wählbar, Kosten je MA pro Arbeitstag × Arbeitstage
-- Fixkosten & sonstige variable Kosten
-- Ergebnis & Marge
-- Szenario Export/Import (JSON)
-- Optionaler CSV/XLSX-Import (Vorbelegung typischer Mengen-Spalten)
+**Fix für „erst beim zweiten Mal“ in der Mengen-Spalte:**
+- Der `st.data_editor` wird jetzt als **Single Source of Truth** direkt über seinen `key` in `st.session_state` geführt.
+- Dadurch wird der Editor-State beim ersten Enter/Rerun nicht mehr durch ein parallel gepflegtes DataFrame „zurückgesetzt“.
 
 ## Installation
 
@@ -27,3 +18,7 @@ pip install -r requirements.txt
 ```bash
 streamlit run app.py
 ```
+
+## Tipp zur Bedienung (Streamlit-Standard)
+- Werte werden sicher übernommen, sobald die Zelle **verlassen** wird (z. B. Klick außerhalb).
+- Mit v3 sollten auch schnelle Edits mit Enter zuverlässig stehen bleiben.

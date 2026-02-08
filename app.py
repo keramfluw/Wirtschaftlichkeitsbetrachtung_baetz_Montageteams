@@ -54,12 +54,14 @@ def to_number(val):
 
 # -----------------------------
 # Session init
+# WICHTIG: Der data_editor soll NICHT bei jedem Rerun durch ein "freshes" DF überschrieben werden.
+# Deshalb verwenden wir die Widget-Keys als Single Source of Truth.
 # -----------------------------
-if "positions_df" not in st.session_state:
-    st.session_state.positions_df = pd.DataFrame(DEFAULT_POSITIONS)
+if "positions_editor" not in st.session_state:
+    st.session_state["positions_editor"] = pd.DataFrame(DEFAULT_POSITIONS)
 
-if "employees_df" not in st.session_state:
-    st.session_state.employees_df = pd.DataFrame(
+if "employees_editor" not in st.session_state:
+    st.session_state["employees_editor"] = pd.DataFrame(
         [
             {"Mitarbeiter": "MA 1", "Kosten_pro_Arbeitstag_EUR": 0.0},
             {"Mitarbeiter": "MA 2", "Kosten_pro_Arbeitstag_EUR": 0.0},
@@ -89,7 +91,6 @@ with st.sidebar:
     st.caption(f"Aktiver Horizont: **{horizon_label}**")
     st.divider()
     st.header("Szenario")
-    st.caption("Du kannst den aktuellen Zustand als JSON exportieren und später wieder importieren.")
 
 # Optional: Import (CSV/XLSX) zur Vorbelegung der Mengen
 with st.expander("Optional: Datei-Import (CSV/XLSX) zum Vorbelegen von Mengen", expanded=False):
@@ -102,13 +103,11 @@ with st.expander("Optional: Datei-Import (CSV/XLSX) zum Vorbelegen von Mengen", 
     import_info = st.empty()
 
 def maybe_import(upl_file):
-    # Wichtig: Import nur EINMAL pro Datei ausführen, damit man danach manuell editieren kann,
-    # ohne dass beim nächsten Rerun die Werte wieder überschrieben werden.
     if upl_file is None:
         return
     file_id = f"{upl_file.name}-{upl_file.size}"
     if st.session_state.get("last_import_file_id") == file_id:
-        return  # schon importiert
+        return
     try:
         if upl_file.name.lower().endswith(".csv"):
             raw = upl_file.getvalue().decode("utf-8", errors="ignore")
@@ -154,13 +153,13 @@ def maybe_import(upl_file):
             reg_min = sum_col(c_regmin)
             sums["Regiearbeit (je 15 Min; 44 €/h)"] = reg_min / 15.0
 
-        df_pos = st.session_state.positions_df.copy()
+        df_pos = st.session_state["positions_editor"].copy()
         for k, v in sums.items():
             mask = df_pos["Position"] == k
             if mask.any():
                 df_pos.loc[mask, "Menge"] = float(v)
 
-        st.session_state.positions_df = df_pos
+        st.session_state["positions_editor"] = df_pos
         st.session_state.last_import_file_id = file_id
         import_info.success("Import erfolgreich: Mengen wurden vorbefüllt. (Ab jetzt kannst du manuell ändern.)")
     except Exception as e:
@@ -170,12 +169,14 @@ maybe_import(upl)
 
 # Einnahmen
 st.subheader("1) Einnahmen (Positionen & Mengen)")
+st.caption("Wichtig: Bei Tabellen-Edits werden Werte zuverlässig übernommen, sobald die Zelle verlassen wird (Klick außerhalb).")
+
 colA, colB = st.columns([2, 1], gap="large")
 
 with colA:
-    st.caption("Tipp: Nach Eingabe kurz außerhalb der Zelle klicken (Commit).")
-    edited_positions = st.data_editor(
-        st.session_state.positions_df,
+    # Single Source of Truth: positions_editor
+    st.data_editor(
+        st.session_state["positions_editor"],
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
@@ -187,11 +188,9 @@ with colA:
             "Menge": st.column_config.NumberColumn(step=1),
         },
     )
-    # wichtig: NICHT wieder neu bauen; einfach übernehmen
-    st.session_state.positions_df = edited_positions.copy()
 
 with colB:
-    df_pos = st.session_state.positions_df.copy()
+    df_pos = st.session_state["positions_editor"].copy()
     df_pos["Preis_EUR"] = df_pos["Preis_EUR"].apply(to_number)
     df_pos["Menge"] = df_pos["Menge"].apply(to_number)
     df_pos["Umsatz_EUR"] = df_pos["Preis_EUR"] * df_pos["Menge"]
@@ -208,18 +207,21 @@ st.subheader("2) Ausgaben (Mitarbeiter, Arbeitstage, Fixkosten)")
 c1, c2, c3 = st.columns([1.2, 1.2, 1.0], gap="large")
 
 with c1:
-    num_employees = st.number_input("Anzahl Mitarbeiter", min_value=0, value=max(2, len(st.session_state.employees_df)), step=1, key="num_employees")
-    emp = st.session_state.employees_df.copy()
+    current_emp = st.session_state["employees_editor"].copy()
+    num_employees = st.number_input("Anzahl Mitarbeiter", min_value=0, value=len(current_emp), step=1, key="num_employees")
 
-    # resize to num_employees
+    emp = current_emp
     if len(emp) < num_employees:
         for i in range(len(emp) + 1, num_employees + 1):
             emp = pd.concat([emp, pd.DataFrame([{"Mitarbeiter": f"MA {i}", "Kosten_pro_Arbeitstag_EUR": 0.0}])], ignore_index=True)
     elif len(emp) > num_employees:
         emp = emp.iloc[:num_employees].reset_index(drop=True)
 
-    edited_emp = st.data_editor(
-        emp,
+    # Update state BEFORE rendering editor to avoid resize-glitches
+    st.session_state["employees_editor"] = emp
+
+    st.data_editor(
+        st.session_state["employees_editor"],
         num_rows="fixed",
         use_container_width=True,
         hide_index=True,
@@ -233,7 +235,6 @@ with c1:
             ),
         },
     )
-    st.session_state.employees_df = edited_emp.copy()
 
 with c2:
     st.write("**Arbeitstage (aus Horizont):**")
@@ -242,7 +243,7 @@ with c2:
     variable_other = st.number_input("Sonstige variable Kosten (EUR)", min_value=0.0, value=0.0, step=50.0, key="variable_other")
 
 with c3:
-    emp2 = st.session_state.employees_df.copy()
+    emp2 = st.session_state["employees_editor"].copy()
     if len(emp2) == 0:
         total_labor = 0.0
         emp2["Kosten_Horizont_EUR"] = []
@@ -276,16 +277,13 @@ with st.expander("Details: Umsatz- & Kosten-Tabelle", expanded=True):
         emp_show["Kosten_Horizont_EUR"] = emp_show["Kosten_Horizont_EUR"].apply(money)
         st.write("**Kosten nach Mitarbeiter:**")
         st.dataframe(emp_show[["Mitarbeiter", "Kosten_pro_Arbeitstag_EUR", "Kosten_Horizont_EUR"]], use_container_width=True, hide_index=True)
-        st.write("**Zusatzkosten:**")
-        st.write(f"- Fixkosten: {money(float(fixed_costs))}")
-        st.write(f"- Sonstige variable Kosten: {money(float(variable_other))}")
 
 # Szenario Export/Import
 scenario = {
     "horizon_mode": horizon_mode,
     "workdays": int(workdays),
-    "positions": st.session_state.positions_df.to_dict(orient="records"),
-    "employees": st.session_state.employees_df.to_dict(orient="records"),
+    "positions": st.session_state["positions_editor"].to_dict(orient="records"),
+    "employees": st.session_state["employees_editor"].to_dict(orient="records"),
     "fixed_costs": float(fixed_costs),
     "variable_other": float(variable_other),
 }
@@ -304,12 +302,9 @@ with st.sidebar:
         try:
             scn = json.loads(up_scn.getvalue().decode("utf-8"))
             if "positions" in scn:
-                st.session_state.positions_df = pd.DataFrame(scn["positions"])
-                # reset editor widget so values show instantly
-                st.session_state["positions_editor"] = st.session_state.positions_df
+                st.session_state["positions_editor"] = pd.DataFrame(scn["positions"])
             if "employees" in scn:
-                st.session_state.employees_df = pd.DataFrame(scn["employees"])
-                st.session_state["employees_editor"] = st.session_state.employees_df
+                st.session_state["employees_editor"] = pd.DataFrame(scn["employees"])
             if "fixed_costs" in scn:
                 st.session_state["fixed_costs"] = float(scn["fixed_costs"])
             if "variable_other" in scn:
